@@ -10,6 +10,7 @@ export default function MetricsPanel() {
   const servers        = useLBStore(s => s.servers)
   const routingCounts  = useLBStore(s => s.routingCounts)
   const totalRequests  = useLBStore(s => s.totalRequests)
+  const rlStats        = useLBStore(s => s.rlStats)
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
@@ -58,10 +59,12 @@ export default function MetricsPanel() {
               <tr key={s.id} style={{ borderBottom: '1px solid #0f172a' }}>
                 <td style={{ padding: '6px 8px', color: '#e2e8f0', fontWeight: 'bold' }}>S{s.id + 1}</td>
                 <td style={{ padding: '6px 8px' }}>
-                  <span style={{ color: cpuColor(s.cpu || 0) }}>{((s.cpu || 0)).toFixed(0)}%</span>
+                  <span style={{ color: cpuColor(s.cpu) }}>
+                    {s.cpu !== null && s.cpu !== undefined ? `${Number(s.cpu).toFixed(1)}%` : 'N/A'}
+                  </span>
                 </td>
-                <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{s.conns || 0}</td>
-                <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{(s.latency_ms || 0).toFixed(0)}ms</td>
+                <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{s.conns ?? 0}</td>
+                <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{(s.latency_ms ?? 0).toFixed(0)}ms</td>
                 <td style={{ padding: '6px 8px', color: '#94a3b8' }}>{routingCounts[s.id] || 0}</td>
                 <td style={{ padding: '6px 8px' }}>
                   <span style={{ background: s.healthy ? '#166534' : '#7f1d1d', color: s.healthy ? '#4ade80' : '#f87171', padding: '1px 6px', borderRadius: 4, fontSize: 10 }}>
@@ -96,6 +99,32 @@ export default function MetricsPanel() {
           </div>
         </div>
       </ChartCard>
+
+      {/* RL Agent Live Metrics from Prometheus */}
+      <div style={{ gridColumn: 'span 2' }}>
+        <ChartCard title="RL Agent (DQN Live Prometheus Metrics)">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+            <div style={{ background: '#0a0e1a', padding: '12px 16px', borderRadius: 8, border: '1px solid #1e293b' }}>
+              <div style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>Average Reward (Episodic)</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: rlStats?.avgReward != null ? (rlStats.avgReward >= 0 ? '#22c55e' : '#f59e0b') : '#64748b' }}>
+                {rlStats?.avgReward != null ? Number(rlStats.avgReward).toFixed(4) : 'N/A'}
+              </div>
+            </div>
+            <div style={{ background: '#0a0e1a', padding: '12px 16px', borderRadius: 8, border: '1px solid #1e293b' }}>
+              <div style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>Exploration Rate (ε)</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: rlStats?.epsilon != null ? '#a78bfa' : '#64748b' }}>
+                {rlStats?.epsilon != null ? `${(Number(rlStats.epsilon) * 100).toFixed(1)}%` : 'N/A'}
+              </div>
+            </div>
+            <div style={{ background: '#0a0e1a', padding: '12px 16px', borderRadius: 8, border: '1px solid #1e293b' }}>
+              <div style={{ fontSize: 11, color: '#64748b', textTransform: 'uppercase', marginBottom: 6 }}>Routing Decisions Total</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: rlStats?.decisionsTotal != null ? '#38bdf8' : '#64748b' }}>
+                {rlStats?.decisionsTotal != null ? Number(rlStats.decisionsTotal).toLocaleString() : 'N/A'}
+              </div>
+            </div>
+          </div>
+        </ChartCard>
+      </div>
     </div>
   )
 }
@@ -112,6 +141,7 @@ function ChartCard({ title, children }) {
 }
 
 function cpuColor(cpu) {
+  if (cpu === null || cpu === undefined) return '#64748b'
   if (cpu < 40) return '#22c55e'
   if (cpu < 70) return '#eab308'
   return '#ef4444'

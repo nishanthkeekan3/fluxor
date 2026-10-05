@@ -4,6 +4,7 @@ Exposes REST API for the Go load balancer to call.
 """
 
 import os, json, time, random, logging
+import threading
 from collections import deque
 from threading import Lock
 
@@ -239,47 +240,89 @@ prom_decides = Counter("rl_decisions_total", "Total routing decisions made")
 # ── Flask API ─────────────────────────────────────────────────
 agent = DQNAgent()
 
+# Store RL transitions separately for each request
+pending_transitions = {}
+transition_lock = threading.Lock()
+
 @app.route("/decide", methods=["POST"])
 def decide():
     """
     POST /decide — called by Go load balancer per request.
-    Body: { cpu_util: [], active_conns: [], avg_latency_ms: [], request_rate: N }
+    Body: { request_id: str, cpu_util: [], active_conns: [], avg_latency_ms: [], request_rate: N }
     Returns: { action: int, q_value: float }
     """
     payload = request.get_json(force=True) or {}
-    state   = build_state(payload)
-    action  = agent.select_action(state)
-    q_vals  = agent.q_values(state)
+    request_id = payload.get("request_id")
 
-    agent._last_state  = state
-    agent._last_action = action
+    state = build_state(payload)
+    action = agent.select_action(state)
+    q_vals = agent.q_values(state)
+
+    if request_id:
+        with transition_lock:
+            pending_transitions[request_id] = {
+                "state": state,
+                "action": action,
+            }
+
     prom_decides.inc()
 
-    return jsonify({"action": action, "q_value": float(max(q_vals))})
+    return jsonify({
+        "action": action,
+        "q_value": float(max(q_vals))
+    })
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
     """
     POST /feedback — called by Go after request completes.
-    Body: { server_id: int, latency_ms: float }
+    Body: { request_id: str, server_id: int, latency_ms: float }
     """
-    payload    = request.get_json(force=True) or {}
+    payload = request.get_json(force=True) or {}
+
+    request_id = payload.get("request_id")
     latency_ms = float(payload.get("latency_ms", 200))
-    server_id  = int(payload.get("server_id", 0))
+    server_id = int(payload.get("server_id", 0))
 
-    if agent._last_state is None:
-        return jsonify({"status": "skipped"})
+    with transition_lock:
+        transition = pending_transitions.pop(request_id, None)
 
-    prev_state  = agent._last_state
-    prev_action = agent._last_action
-    reward      = compute_reward(prev_state, prev_action, latency_ms)
+    if transition is None:
+        return jsonify({
+            "status": "skipped",
+            "reason": "transition_not_found"
+        })
+
+    prev_state = transition["state"]
+    prev_action = transition["action"]
+
+    reward = compute_reward(
+        prev_state,
+        prev_action,
+        latency_ms
+    )
 
     # Build next state from Prometheus
-    next_payload = {"cpu_util": [], "active_conns": [], "avg_latency_ms": []}
-    next_state   = build_state(next_payload)
+    next_payload = {
+        "cpu_util": [],
+        "active_conns": [],
+        "avg_latency_ms": []
+    }
 
-    agent.store_and_train(prev_state, prev_action, reward, next_state)
-    return jsonify({"status": "ok", "reward": reward})
+    next_state = build_state(next_payload)
+
+    agent.store_and_train(
+        prev_state,
+        prev_action,
+        reward,
+        next_state
+    )
+
+    return jsonify({
+        "status": "ok",
+        "reward": reward,
+        "server_id": server_id
+    })
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -300,5 +343,5 @@ def health():
 
 if __name__ == "__main__":
     log.info(f"RL Agent starting — state_dim={STATE_DIM} action_dim={ACTION_DIM}")
-    port = int(os.environ.get("PORT", 5005))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, threaded=True)

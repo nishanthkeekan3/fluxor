@@ -1,5 +1,6 @@
 import React from 'react'
 import { useWebSocket } from './hooks/useWebSocket'
+import { useExperiment } from './hooks/useExperiment'
 import { useLBStore } from './store/useLBStore'
 import TopologyCanvas from './components/TopologyCanvas'
 import MetricsPanel from './components/MetricsPanel'
@@ -12,9 +13,42 @@ const ALGO_OPTIONS = [
 
 export default function App() {
   const { setAlgorithm } = useWebSocket()
-  const wsStatus   = useLBStore(s => s.wsStatus)
-  const algorithm  = useLBStore(s => s.algorithm)
-  const totalReqs  = useLBStore(s => s.totalRequests)
+  const {
+    startExperiment,
+    stopExperiment,
+    refreshExperimentStatus,
+  } = useExperiment()
+
+  const wsStatus           = useLBStore(s => s.wsStatus)
+  const algorithm          = useLBStore(s => s.algorithm)
+  const totalReqs          = useLBStore(s => s.totalRequests)
+  const experimentRunning  = useLBStore(s => s.experimentRunning)
+  const experimentScenario = useLBStore(s => s.experimentScenario)
+
+  const [selectedScenario, setSelectedScenario] = React.useState('normal')
+  const [experimentError, setExperimentError] = React.useState(null)
+
+  React.useEffect(() => {
+    refreshExperimentStatus().catch(() => {})
+  }, [refreshExperimentStatus])
+
+  const handleRunExperiment = async () => {
+    setExperimentError(null)
+    try {
+      await startExperiment(selectedScenario)
+    } catch (err) {
+      setExperimentError(err.message || 'Failed to start experiment')
+    }
+  }
+
+  const handleStopExperiment = async () => {
+    setExperimentError(null)
+    try {
+      await stopExperiment()
+    } catch (err) {
+      setExperimentError(err.message || 'Failed to stop experiment')
+    }
+  }
 
   return (
     <div style={{ minHeight: '100vh', padding: '16px 24px', background: '#0a0e1a' }}>
@@ -38,7 +72,7 @@ export default function App() {
       </div>
 
       {/* Algorithm Selector */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
         <span style={{ fontSize: 12, color: '#64748b', alignSelf: 'center', marginRight: 4 }}>ALGORITHM:</span>
         {ALGO_OPTIONS.map(opt => (
           <button
@@ -62,6 +96,89 @@ export default function App() {
             </span>
           </button>
         ))}
+      </div>
+
+      {/* Experiment Control Panel */}
+      <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: 10, padding: '12px 16px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Load Test Experiment:
+            </span>
+            <select
+              value={selectedScenario}
+              onChange={(e) => setSelectedScenario(e.target.value)}
+              disabled={experimentRunning}
+              style={{
+                padding: '6px 12px',
+                borderRadius: 6,
+                border: '1px solid #1e293b',
+                background: '#0a0e1a',
+                color: '#e2e8f0',
+                fontSize: 12,
+                cursor: experimentRunning ? 'not-allowed' : 'pointer',
+                outline: 'none',
+              }}
+            >
+              <option value="normal">Normal Traffic</option>
+              <option value="spike">Traffic Spike</option>
+              <option value="failure">Server Failure</option>
+            </select>
+            <button
+              type="button"
+              onClick={handleRunExperiment}
+              disabled={experimentRunning}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: 'none',
+                background: experimentRunning ? '#1e293b' : '#16a34a',
+                color: experimentRunning ? '#64748b' : '#ffffff',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: experimentRunning ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              RUN EXPERIMENT
+            </button>
+            <button
+              type="button"
+              onClick={handleStopExperiment}
+              disabled={!experimentRunning}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: 'none',
+                background: !experimentRunning ? '#1e293b' : '#dc2626',
+                color: !experimentRunning ? '#64748b' : '#ffffff',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: !experimentRunning ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              STOP
+            </button>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+            <span style={{ color: '#64748b' }}>STATUS:</span>
+            {experimentRunning ? (
+              <span style={{ color: '#22c55e', fontWeight: 700, background: '#052e16', padding: '3px 8px', borderRadius: 4, border: '1px solid #22c55e40' }}>
+                RUNNING ({experimentScenario || selectedScenario})
+              </span>
+            ) : (
+              <span style={{ color: '#94a3b8', fontWeight: 600, background: '#0a0e1a', padding: '3px 8px', borderRadius: 4, border: '1px solid #1e293b' }}>
+                IDLE
+              </span>
+            )}
+          </div>
+        </div>
+        {experimentError && (
+          <div style={{ color: '#f87171', background: '#450a0a', padding: '6px 12px', borderRadius: 6, fontSize: 11, border: '1px solid #ef444440', marginTop: 10 }}>
+            {experimentError}
+          </div>
+        )}
       </div>
 
       {/* Topology Canvas */}

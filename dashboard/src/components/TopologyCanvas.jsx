@@ -111,6 +111,12 @@ export default function TopologyCanvas() {
     storeRef.current = svg
   }, []) // only on mount
 
+  useEffect(() => {
+    const svg = storeRef.current
+    if (!svg) return
+    svg.select('#lb-algo-label').text(algorithm.toUpperCase())
+  }, [algorithm])
+
   // Update server colors & labels
   useEffect(() => {
     const svg = storeRef.current

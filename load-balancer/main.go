@@ -143,7 +143,7 @@ type RLResponse struct {
 	QValue float64 `json:"q_value"`
 }
 
-func (lb *LoadBalancer) rlDecide() *Server {
+func (lb *LoadBalancer) rlDecide(requestID string) *Server {
 	healthy := lb.healthyServers()
 	if len(healthy) == 0 {
 		return nil
@@ -160,7 +160,14 @@ func (lb *LoadBalancer) rlDecide() *Server {
 		state.AvgLatency[i] = s.AvgLatency()
 	}
 
-	body, _ := json.Marshal(state)
+	payload := map[string]interface{}{
+		"request_id":     requestID,
+		"cpu_util":       state.CPUUtil,
+		"active_conns":   state.ActiveConns,
+		"avg_latency_ms": state.AvgLatency,
+		"request_rate":   state.RequestRate,
+	}
+	body, _ := json.Marshal(payload)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -187,13 +194,13 @@ func (lb *LoadBalancer) rlDecide() *Server {
 	return lb.roundRobin()
 }
 
-func (lb *LoadBalancer) SelectServer() (*Server, string) {
+func (lb *LoadBalancer) SelectServer(reqID string) (*Server, string) {
 	algo := lb.GetAlgorithm()
 	switch algo {
 	case "lc":
 		return lb.leastConnections(), algo
 	case "rl":
-		return lb.rlDecide(), algo
+		return lb.rlDecide(reqID), algo
 	default:
 		return lb.roundRobin(), "rr"
 	}
@@ -346,7 +353,10 @@ var lb *LoadBalancer
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
-	server, algo := lb.SelectServer()
+	start := time.Now()
+	reqID := fmt.Sprintf("req_%d", start.UnixMilli())
+
+	server, algo := lb.SelectServer(reqID)
 	if server == nil {
 		http.Error(w, "no healthy backends", http.StatusServiceUnavailable)
 		return
@@ -354,9 +364,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	server.IncrConn()
 	activeConns.WithLabelValues(fmt.Sprintf("%d", server.ID)).Set(float64(server.GetConns()))
-
-	start := time.Now()
-	reqID := fmt.Sprintf("req_%d", start.UnixMilli())
 
 	proxy := httputil.NewSingleHostReverseProxy(server.URL)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -377,7 +384,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Send feedback to RL agent (non-blocking)
 	if algo == "rl" {
-		go sendRLFeedback(server.ID, latency)
+		go sendRLFeedback(reqID, server.ID, latency)
 	}
 
 	// Broadcast WebSocket event
@@ -404,8 +411,9 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func sendRLFeedback(serverID int, latencyMs float64) {
+func sendRLFeedback(requestID string, serverID int, latencyMs float64) {
 	body, _ := json.Marshal(map[string]interface{}{
+		"request_id": requestID,
 		"server_id":  serverID,
 		"latency_ms": latencyMs,
 	})
@@ -471,6 +479,15 @@ func main() {
 
 	// Admin API
 	mux.HandleFunc("/admin/algorithm", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		if r.Method == http.MethodPost {
 			var body struct {
 				Algorithm string `json:"algorithm"`

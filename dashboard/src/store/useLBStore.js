@@ -9,6 +9,26 @@ export const useLBStore = create((set, get) => ({
   algorithm: 'rr',
   setAlgorithm: (a) => set({ algorithm: a }),
 
+  // Experiment
+  experimentRunning: false,
+  experimentScenario: null,
+  setExperimentRunning(running) {
+    set({ experimentRunning: running })
+  },
+  setExperimentScenario(scenario) {
+    set({ experimentScenario: scenario })
+  },
+  resetExperimentTelemetry() {
+    set({
+      totalRequests: 0,
+      routingCounts: { 0: 0, 1: 0, 2: 0 },
+      latencyHistory: [],
+      rewardHistory: [],
+      rpsHistory: [],
+      particles: [],
+    })
+  },
+
   // Server states from last event
   servers: [
     { id: 0, conns: 0, latency_ms: 0, healthy: true, cpu: 0 },

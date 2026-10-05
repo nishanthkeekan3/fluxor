@@ -5,7 +5,7 @@
 import http from 'k6/http'
 import { sleep, check } from 'k6'
 
-const LB = 'http://localhost:8080'
+const LB = __ENV.LB_URL || 'http://localhost:8080'
 
 // ── Scenario 1: Normal Traffic ────────────────────────────────
 export const normalOptions = {
@@ -52,7 +52,12 @@ export const failureOptions = {
 }
 
 // Default export — change options to switch scenario
-export const options = spikeOptions
+const scenario = __ENV.SCENARIO || 'spike'
+
+export const options =
+  scenario === 'normal' ? normalOptions :
+  scenario === 'failure' ? failureOptions :
+  spikeOptions
 
 export default function () {
   const res = http.get(`${LB}/work`, { timeout: '5s' })

@@ -79,7 +79,7 @@ services:
     environment:
       - BACKEND_URLS=http://backend-1:8081,http://backend-2:8082,http://backend-3:8083
       - RL_AGENT_URL=http://rl-agent:5000
-      - ALGORITHM=rr
+      - ALGORITHM=rl
     networks:
       - lb-net
     depends_on:
@@ -123,11 +123,27 @@ services:
     build:
       context: ./dashboard
       args:
-        - VITE_WS_URL=ws://load-balancer:8080/ws
-        - VITE_LB_URL=http://load-balancer:8080
+        - VITE_WS_URL=ws://localhost:8080/ws
+        - VITE_LB_URL=http://localhost:8080
     container_name: dashboard
     ports:
       - "3000:3000"
+    networks:
+      - lb-net
+    depends_on:
+      - load-balancer
+
+  # ── Experiment Runner ─────────────────────────────────────────
+  experiment-runner:
+    build: ./experiment-runner
+    container_name: experiment-runner
+    ports:
+      - "5006:5000"
+    environment:
+      - LB_URL=http://load-balancer:8080
+    volumes:
+      - ./scripts:/scripts:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - lb-net
     depends_on:
