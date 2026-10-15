@@ -3,6 +3,7 @@ RL Agent — DQN-based load balancing decision maker.
 Exposes REST API for the Go load balancer to call.
 """
 
+from __future__ import annotations
 import os, json, time, random, logging
 import threading
 from collections import deque
@@ -20,6 +21,13 @@ logging.basicConfig(level=logging.INFO, format="[RL] %(message)s")
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 @app.route("/")
 def index():
@@ -86,14 +94,16 @@ class DQNAgent:
         self.buffer    = ReplayBuffer()
 
         self.epsilon       = 1.0
-        self.epsilon_min   = 0.05
-        self.epsilon_decay = 0.995
+        self.epsilon_min   = 0.01
+        self.epsilon_decay = 0.999
         self.gamma         = 0.95
-        self.batch_size    = 64
+        self.batch_size    = 32
         self.target_sync   = 50
         self.step_count    = 0
+        self.decisions_total = 0
         self.total_reward  = 0.0
         self.episode_steps = 0
+        self.recent_rewards = deque(maxlen=100)
         self.lock          = Lock()
 
         self._last_state   = None
@@ -103,6 +113,8 @@ class DQNAgent:
         self.load_checkpoint()
 
     def select_action(self, state: np.ndarray) -> int:
+        with self.lock:
+            self.decisions_total += 1
         if random.random() < self.epsilon:
             return random.randint(0, ACTION_DIM - 1)
         with torch.no_grad():
@@ -120,6 +132,7 @@ class DQNAgent:
             self.buffer.push(state, action, reward, next_state)
             self.total_reward += reward
             self.episode_steps += 1
+            self.recent_rewards.append(reward)
 
             if len(self.buffer) < self.batch_size:
                 return
@@ -144,7 +157,8 @@ class DQNAgent:
             self.step_count += 1
             self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
             prom_epsilon.set(self.epsilon)
-            prom_reward.set(self.total_reward / max(1, self.episode_steps))
+            avg_r = float(np.mean(self.recent_rewards))
+            prom_reward.set(avg_r)
 
             if self.step_count % self.target_sync == 0:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -152,7 +166,7 @@ class DQNAgent:
             if self.step_count % 100 == 0:
                 self.save_checkpoint()
                 log.info(f"step={self.step_count} eps={self.epsilon:.3f} "
-                         f"avg_reward={self.total_reward/max(1,self.episode_steps):.3f}")
+                         f"avg_reward={avg_r:.3f}")
 
     def save_checkpoint(self):
         torch.save({
@@ -160,6 +174,7 @@ class DQNAgent:
             "target": self.target_net.state_dict(),
             "epsilon": self.epsilon,
             "step_count": self.step_count,
+            "decisions_total": self.decisions_total,
         }, CKPT_PATH)
 
     def load_checkpoint(self):
@@ -167,8 +182,9 @@ class DQNAgent:
             ck = torch.load(CKPT_PATH, map_location="cpu")
             self.policy_net.load_state_dict(ck["policy"])
             self.target_net.load_state_dict(ck["target"])
-            self.epsilon    = ck.get("epsilon", self.epsilon)
-            self.step_count = ck.get("step_count", 0)
+            self.epsilon        = ck.get("epsilon", self.epsilon)
+            self.step_count     = ck.get("step_count", 0)
+            self.decisions_total = ck.get("decisions_total", self.step_count)
             log.info(f"Checkpoint loaded: step={self.step_count} eps={self.epsilon:.3f}")
 
 # ── State Builder ─────────────────────────────────────────────
@@ -213,24 +229,26 @@ def compute_reward(state: np.ndarray, action: int, latency_ms: float) -> float:
     return float(np.clip(r_latency + r_balance + r_capacity, -15.0, 1.0))
 
 _prom_cache = {}
-_prom_cache_ts = {}
+
+def _prom_poller():
+    """Background poller so Prometheus network calls never block /decide or /feedback."""
+    while True:
+        try:
+            for i in range(N_SERVERS):
+                query = f'backend_cpu_utilization{{server_id="{i+1}"}}'
+                r = requests.get(f"{PROM_URL}/api/v1/query", params={"query": query}, timeout=0.25)
+                if r.status_code == 200:
+                    result = r.json().get("data", {}).get("result", [])
+                    if result and len(result) > 0:
+                        _prom_cache[query] = float(result[0]["value"][1])
+        except Exception:
+            pass
+        time.sleep(2)
+
+threading.Thread(target=_prom_poller, daemon=True).start()
 
 def _prom_metric(query: str) -> float | None:
-    now = time.time()
-    if query in _prom_cache and now - _prom_cache_ts.get(query, 0) < 2:
-        return _prom_cache[query]
-    try:
-        r = requests.get(f"{PROM_URL}/api/v1/query",
-                         params={"query": query}, timeout=1)
-        result = r.json()["data"]["result"]
-        if result:
-            val = float(result[0]["value"][1])
-            _prom_cache[query] = val
-            _prom_cache_ts[query] = now
-            return val
-    except Exception:
-        pass
-    return None
+    return _prom_cache.get(query, None)
 
 # ── Prometheus Metrics ────────────────────────────────────────
 prom_epsilon = Gauge("rl_epsilon", "Current exploration rate")
@@ -260,6 +278,10 @@ def decide():
 
     if request_id:
         with transition_lock:
+            if len(pending_transitions) > 5000:
+                old_keys = list(pending_transitions.keys())[:1000]
+                for k in old_keys:
+                    pending_transitions.pop(k, None)
             pending_transitions[request_id] = {
                 "state": state,
                 "action": action,
@@ -302,7 +324,7 @@ def feedback():
         latency_ms
     )
 
-    # Build next state from Prometheus
+    # Build next state quickly
     next_payload = {
         "cpu_util": [],
         "active_conns": [],
@@ -326,12 +348,25 @@ def feedback():
 
 @app.route("/status", methods=["GET"])
 def status():
-    return jsonify({
-        "epsilon":    round(agent.epsilon, 4),
-        "step_count": agent.step_count,
-        "buffer_len": len(agent.buffer),
-        "avg_reward": round(agent.total_reward / max(1, agent.episode_steps), 4),
-    })
+    with agent.lock:
+        avg_r = float(np.mean(agent.recent_rewards)) if len(agent.recent_rewards) > 0 else (
+            round(agent.total_reward / max(1, agent.episode_steps), 4)
+        )
+        return jsonify({
+            "epsilon":         round(agent.epsilon, 4),
+            "step_count":      agent.step_count,
+            "buffer_len":      len(agent.buffer),
+            "avg_reward":      round(avg_r, 4),
+            "decisions_total": agent.decisions_total,
+        })
+
+@app.route("/reset", methods=["POST", "GET"])
+def reset():
+    with agent.lock:
+        agent.total_reward = 0.0
+        agent.episode_steps = 0
+        agent.recent_rewards.clear()
+    return jsonify({"status": "reset"})
 
 @app.route("/metrics")
 def metrics():

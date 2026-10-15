@@ -160,6 +160,26 @@ export default function App() {
             >
               STOP
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                useLBStore.getState().resetExperimentTelemetry()
+                fetch('http://localhost:5000/reset', { method: 'POST' }).catch(() => {})
+              }}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: '1px solid #1e293b',
+                background: '#0a0e1a',
+                color: '#94a3b8',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              RESET
+            </button>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
             <span style={{ color: '#64748b' }}>STATUS:</span>

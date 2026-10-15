@@ -74,9 +74,13 @@ func NewLoadBalancer(backendURLs []string, rlAgentURL string, hub *Hub) *LoadBal
 		}
 		servers[i] = &Server{URL: u, ID: i, Healthy: 1}
 	}
+	algo := os.Getenv("ALGORITHM")
+	if algo == "" {
+		algo = "rl"
+	}
 	return &LoadBalancer{
 		servers:    servers,
-		algorithm:  os.Getenv("ALGORITHM"),
+		algorithm:  algo,
 		rlAgentURL: rlAgentURL,
 		hub:        hub,
 	}
@@ -168,7 +172,7 @@ func (lb *LoadBalancer) rlDecide(requestID string) *Server {
 		"request_rate":   state.RequestRate,
 	}
 	body, _ := json.Marshal(payload)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 
 	req, _ := http.NewRequestWithContext(ctx, "POST", lb.rlAgentURL+"/decide", bytes.NewReader(body))
@@ -368,7 +372,14 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	proxy := httputil.NewSingleHostReverseProxy(server.URL)
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("[PROXY] error to %s: %v", server.URL, err)
+		atomic.StoreInt32(&server.Healthy, 0)
 		http.Error(w, "backend error", http.StatusBadGateway)
+	}
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if resp.StatusCode >= 500 {
+			atomic.StoreInt32(&server.Healthy, 0)
+		}
+		return nil
 	}
 
 	proxy.ServeHTTP(w, r)
@@ -417,7 +428,7 @@ func sendRLFeedback(requestID string, serverID int, latencyMs float64) {
 		"server_id":  serverID,
 		"latency_ms": latencyMs,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "POST", lb.rlAgentURL+"/feedback", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -427,11 +438,11 @@ func sendRLFeedback(requestID string, serverID int, latencyMs float64) {
 // ─── Health Checker ───────────────────────────────────────────────────────────
 
 func healthChecker(servers []*Server) {
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	for range ticker.C {
 		for _, s := range servers {
 			go func(srv *Server) {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 				defer cancel()
 				req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL.String()+"/health", nil)
 				resp, err := http.DefaultClient.Do(req)
@@ -457,11 +468,18 @@ func healthChecker(servers []*Server) {
 func main() {
 	initMetrics()
 
-	backendURLs := strings.Split(os.Getenv("BACKEND_URLS"), ",")
+	backendURLsStr := os.Getenv("BACKEND_URLS")
+	if backendURLsStr == "" {
+		backendURLsStr = "http://127.0.0.1:8081,http://127.0.0.1:8082,http://127.0.0.1:8083"
+	}
+	backendURLsStr = strings.ReplaceAll(backendURLsStr, "localhost", "127.0.0.1")
+	backendURLs := strings.Split(backendURLsStr, ",")
+
 	rlAgentURL := os.Getenv("RL_AGENT_URL")
 	if rlAgentURL == "" {
-		rlAgentURL = "http://localhost:5000"
+		rlAgentURL = "http://127.0.0.1:5000"
 	}
+	rlAgentURL = strings.ReplaceAll(rlAgentURL, "localhost", "127.0.0.1")
 
 	hub := newHub()
 	go hub.Run()

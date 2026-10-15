@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const { spawn, exec } = require('child_process');
 
 const app = express();
@@ -24,29 +25,31 @@ let isStopping = false;
 
 function stopBackend2() {
   return new Promise((resolve) => {
-    console.log('[experiment-runner] Stopping container backend-2...');
-    exec('docker stop backend-2', (err, stdout, stderr) => {
-      if (err) {
-        console.error('[experiment-runner] Failed to stop backend-2:', err.message);
-      } else {
-        console.log('[experiment-runner] backend-2 stopped successfully');
-      }
+    console.log('[experiment-runner] Triggering failure on backend-2...');
+    const http = require('http');
+    const req = http.request({ host: '127.0.0.1', port: 8082, path: '/simulate-fail', method: 'POST', timeout: 1000 }, (res) => {
+      console.log(`[experiment-runner] backend-2 failure activated via HTTP (${res.statusCode})`);
       resolve();
     });
+    req.on('error', () => {
+      exec('docker stop backend-2', () => resolve());
+    });
+    req.end();
   });
 }
 
 function restartBackend2() {
   return new Promise((resolve) => {
-    console.log('[experiment-runner] Restarting container backend-2...');
-    exec('docker start backend-2', (err, stdout, stderr) => {
-      if (err) {
-        console.error('[experiment-runner] Failed to restart backend-2:', err.message);
-      } else {
-        console.log('[experiment-runner] backend-2 restarted successfully');
-      }
+    console.log('[experiment-runner] Recovering backend-2...');
+    const http = require('http');
+    const req = http.request({ host: '127.0.0.1', port: 8082, path: '/simulate-recover', method: 'POST', timeout: 1000 }, (res) => {
+      console.log(`[experiment-runner] backend-2 recovered via HTTP (${res.statusCode})`);
       resolve();
     });
+    req.on('error', () => {
+      exec('docker start backend-2', () => resolve());
+    });
+    req.end();
   });
 }
 
@@ -82,7 +85,8 @@ app.post('/start', (req, res) => {
     SCENARIO: scenario,
   };
 
-  runningProcess = spawn('k6', ['run', '/scripts/loadtest.js'], { env });
+  const scriptPath = process.env.SCRIPT_PATH || path.resolve(__dirname, '../scripts/loadtest.js');
+  runningProcess = spawn('k6', ['run', scriptPath], { env });
 
   if (scenario === 'failure') {
     failureTimer = setTimeout(() => {
@@ -128,67 +132,54 @@ app.post('/start', (req, res) => {
   });
 });
 
+function killK6Processes(pid) {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      if (pid) {
+        try { exec(`taskkill /pid ${pid} /T /F`); } catch (_) {}
+      }
+      exec('taskkill /IM k6.exe /F /T', () => resolve());
+    } else {
+      if (pid) {
+        try { process.kill(-pid, 'SIGKILL'); } catch (_) {
+          try { process.kill(pid, 'SIGKILL'); } catch (_) {}
+        }
+      }
+      exec('pkill -9 -f k6', () => resolve());
+    }
+  });
+}
+
 // POST /stop
 app.post('/stop', async (req, res) => {
-  if (!runningProcess) {
-    if (currentScenario === 'failure') {
-      if (failureTimer) {
-        clearTimeout(failureTimer);
-        failureTimer = null;
-      }
-      await restartBackend2();
-      currentScenario = null;
-    }
-    return res.json({ status: 'stopped' });
-  }
-
   isStopping = true;
   if (failureTimer) {
     clearTimeout(failureTimer);
     failureTimer = null;
   }
 
-  const proc = runningProcess;
-  const isFailure = currentScenario === 'failure';
-  let closed = false;
-  let forceKillTimer = null;
-
-  const cleanupAndRespond = async () => {
-    if (closed) return;
-    closed = true;
-    if (forceKillTimer) clearTimeout(forceKillTimer);
-
-    if (isFailure) {
-      await restartBackend2();
-    }
-
-    runningProcess = null;
-    currentScenario = null;
-    isStopping = false;
-    res.json({ status: 'stopped' });
-  };
-
-  proc.once('close', cleanupAndRespond);
-  proc.once('error', cleanupAndRespond);
-
-  try {
-    proc.kill('SIGINT');
-  } catch (err) {
-    cleanupAndRespond();
-    return;
+  // Synchronously kill the spawned k6 process handle in 0ms
+  if (runningProcess) {
+    try { runningProcess.kill(); } catch (_) {}
   }
 
-  forceKillTimer = setTimeout(() => {
-    if (!closed) {
-      try {
-        proc.kill('SIGKILL');
-      } catch (err) {
-        cleanupAndRespond();
-      }
-    }
-  }, 2000);
+  const pid = runningProcess?.pid;
+  const isFailure = currentScenario === 'failure';
+
+  // Unconditionally terminate any remaining k6 process instances
+  await killK6Processes(pid);
+
+  if (isFailure) {
+    restartBackend2().catch(() => {});
+  }
+
+  runningProcess = null;
+  currentScenario = null;
+  isStopping = false;
+
+  return res.json({ status: 'stopped' });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(`[experiment-runner] Server listening on port ${PORT}`);
 });

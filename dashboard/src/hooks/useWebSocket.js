@@ -28,6 +28,10 @@ const getPromUrl = () => {
   return `http://${getHost()}:9090`
 }
 
+const getRlAgentUrl = () => {
+  return `http://${getHost()}:5000`
+}
+
 let rpsWindow = []
 
 export function useWebSocket() {
@@ -141,16 +145,42 @@ export function useWebSocket() {
         .catch(() => {})
     }, 3000)
 
-    // Poll real Prometheus API for backend_cpu_utilization and RL metrics
+    // Poll metrics from Prometheus with graceful direct fallback to RL Agent and Backends
     const pollPrometheus = () => {
-      // 1. Fetch real backend CPU utilization
+      const fallbackBackendCpu = () => {
+        const ports = [8081, 8082, 8083]
+        Promise.allSettled(
+          ports.map((port, idx) =>
+            fetch(`http://${getHost()}:${port}/status`)
+              .then(r => r.json())
+              .then(d => ({ id: idx, cpu: parseFloat(d.cpu_load) }))
+          )
+        ).then(results => {
+          const newCpuMap = {}
+          results.forEach(res => {
+            if (res.status === 'fulfilled' && !isNaN(res.value?.cpu)) {
+              newCpuMap[res.value.id] = res.value.cpu
+            }
+          })
+          if (Object.keys(newCpuMap).length > 0) {
+            cpuMapRef.current = newCpuMap
+            const currentServers = useLBStore.getState().servers || []
+            const updated = currentServers.map(s => ({
+              ...s,
+              cpu: newCpuMap[s.id] !== undefined ? newCpuMap[s.id] : s.cpu,
+            }))
+            useLBStore.getState().updateServers(updated)
+          }
+        }).catch(() => {})
+      }
+
+      // 1. Fetch backend CPU
       fetch(`${promUrl}/api/v1/query?query=backend_cpu_utilization`)
         .then(r => r.json())
         .then(data => {
-          if (data?.status === 'success' && Array.isArray(data?.data?.result)) {
+          if (data?.status === 'success' && Array.isArray(data?.data?.result) && data.data.result.length > 0) {
             const newCpuMap = {}
             data.data.result.forEach(item => {
-              // Server IDs in Prometheus metric are "1", "2", "3" -> 0-indexed in store: 0, 1, 2
               const sid = parseInt(item.metric?.server_id, 10) - 1
               const val = parseFloat(item.value?.[1])
               if (!isNaN(sid) && !isNaN(val)) {
@@ -158,8 +188,6 @@ export function useWebSocket() {
               }
             })
             cpuMapRef.current = newCpuMap
-
-            // Update current servers in store with real CPU values
             const currentServers = useLBStore.getState().servers || []
             const updated = currentServers.map(s => ({
               ...s,
@@ -167,21 +195,14 @@ export function useWebSocket() {
             }))
             useLBStore.getState().updateServers(updated)
           } else {
-            cpuMapRef.current = {}
-            const currentServers = useLBStore.getState().servers || []
-            const updated = currentServers.map(s => ({ ...s, cpu: null }))
-            useLBStore.getState().updateServers(updated)
+            fallbackBackendCpu()
           }
         })
         .catch(() => {
-          // If Prometheus is unavailable, show unknown/unavailable state (null)
-          cpuMapRef.current = {}
-          const currentServers = useLBStore.getState().servers || []
-          const updated = currentServers.map(s => ({ ...s, cpu: null }))
-          useLBStore.getState().updateServers(updated)
+          fallbackBackendCpu()
         })
 
-      // 2. Fetch real RL metrics from Prometheus if available
+      // 2. Fetch RL metrics (Prometheus with direct fallback to RL Agent /status)
       Promise.allSettled([
         fetch(`${promUrl}/api/v1/query?query=rl_avg_reward`).then(r => r.json()),
         fetch(`${promUrl}/api/v1/query?query=rl_epsilon`).then(r => r.json()),
@@ -193,11 +214,7 @@ export function useWebSocket() {
 
         if (rewardRes.status === 'fulfilled' && rewardRes.value?.data?.result?.[0]?.value?.[1]) {
           const val = parseFloat(rewardRes.value.data.result[0].value[1])
-          if (!isNaN(val)) {
-            avgReward = val
-            const timeLabel = new Date().toLocaleTimeString()
-            useLBStore.getState().pushReward({ time: timeLabel, reward: parseFloat(val.toFixed(4)) })
-          }
+          if (!isNaN(val)) avgReward = val
         }
         if (epsRes.status === 'fulfilled' && epsRes.value?.data?.result?.[0]?.value?.[1]) {
           const val = parseFloat(epsRes.value.data.result[0].value[1])
@@ -208,23 +225,57 @@ export function useWebSocket() {
           if (!isNaN(val)) decisionsTotal = val
         }
 
-        useLBStore.setState({
-          rlStats: {
-            avgReward,
-            epsilon,
-            decisionsTotal,
+        if (avgReward != null || epsilon != null || decisionsTotal != null) {
+          if (avgReward != null) {
+            const timeLabel = new Date().toLocaleTimeString()
+            useLBStore.getState().pushReward({ time: timeLabel, reward: parseFloat(avgReward.toFixed(4)) })
           }
-        })
+          useLBStore.setState({
+            rlStats: { avgReward, epsilon, decisionsTotal }
+          })
+        } else {
+          // Direct fallback to RL Agent /status on :5000
+          fetch(`${getRlAgentUrl()}/status`)
+            .then(r => r.json())
+            .then(data => {
+              if (data && data.step_count !== undefined) {
+                const timeLabel = new Date().toLocaleTimeString()
+                const rVal = parseFloat(Number(data.avg_reward || 0).toFixed(4))
+                useLBStore.getState().pushReward({ time: timeLabel, reward: rVal })
+                useLBStore.setState({
+                  rlStats: {
+                    avgReward: data.avg_reward,
+                    epsilon: data.epsilon,
+                    decisionsTotal: data.decisions_total !== undefined ? data.decisions_total : data.step_count,
+                  }
+                })
+              }
+            })
+            .catch(() => {})
+        }
       }).catch(() => {})
     }
 
     pollPrometheus()
     const promInterval = setInterval(pollPrometheus, 2000)
 
+    // Active RPS decay ticker — ensures RPS chart drops immediately and accurately to 0 when stopped
+    const rpsInterval = setInterval(() => {
+      const nowMs = Date.now()
+      const prevLen = rpsWindow.length
+      rpsWindow = rpsWindow.filter(t => nowMs - t < 3000)
+      if (prevLen > 0 || rpsWindow.length > 0) {
+        const timeLabel = new Date().toLocaleTimeString()
+        const rps = (rpsWindow.length / 3).toFixed(1)
+        useLBStore.getState().pushRps({ time: timeLabel, rps })
+      }
+    }, 1000)
+
     return () => {
       isCleanedUpRef.current = true
       clearInterval(statusInterval)
       clearInterval(promInterval)
+      clearInterval(rpsInterval)
       clearTimeout(retryRef.current)
       if (wsRef.current) {
         wsRef.current.onclose = null
@@ -251,6 +302,11 @@ function handleRouteEvent(event, cpuMapRef) {
     store.updateServers(merged)
   }
 
+  // When experiment is NOT running, immediately drop trailing route events to freeze count
+  if (!store.experimentRunning) {
+    return
+  }
+
   // Increment counters
   store.incRequest(event.server_id)
 
@@ -268,9 +324,9 @@ function handleRouteEvent(event, cpuMapRef) {
   }
   store.pushLatency(latEntry)
 
-  // Track RPS
+  // Track RPS with responsive 3s window
   const nowMs = Date.now()
   rpsWindow.push(nowMs)
-  rpsWindow = rpsWindow.filter(t => nowMs - t < 5000)
-  store.pushRps({ time: timeLabel, rps: (rpsWindow.length / 5).toFixed(1) })
+  rpsWindow = rpsWindow.filter(t => nowMs - t < 3000)
+  store.pushRps({ time: timeLabel, rps: (rpsWindow.length / 3).toFixed(1) })
 }

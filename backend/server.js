@@ -62,18 +62,44 @@ setInterval(() => {
   activeConnsGauge.set({ server_id: SERVER_ID }, activeConnections);
 }, 2000);
 
-// ── Middleware ────────────────────────────────────────────────
+// ── Failure Simulation ───────────────────────────────────────
+let isFailed = false;
+
+app.all('/simulate-fail', (req, res) => {
+  isFailed = true;
+  console.log(`[backend-${SERVER_ID}] Simulated failure activated!`);
+  res.json({ status: 'failed', server_id: SERVER_ID });
+});
+
+app.all('/simulate-recover', (req, res) => {
+  isFailed = false;
+  console.log(`[backend-${SERVER_ID}] Simulated failure recovered!`);
+  res.json({ status: 'recovered', server_id: SERVER_ID });
+});
+
+app.use((req, res, next) => {
+  if (isFailed && !req.path.startsWith('/simulate-')) {
+    return res.status(503).json({ error: 'Server unavailable (simulated failure)', server_id: SERVER_ID });
+  }
+  next();
+});
+
 app.use((req, res, next) => {
   activeConnections++;
   activeConnsGauge.set({ server_id: SERVER_ID }, activeConnections);
   const start = Date.now();
-  res.on('finish', () => {
+  let finished = false;
+  const cleanup = () => {
+    if (finished) return;
+    finished = true;
     activeConnections = Math.max(0, activeConnections - 1);
     const ms = Date.now() - start;
     latencyHist.observe({ server_id: SERVER_ID }, ms);
-    reqCounter.inc({ server_id: SERVER_ID, status: res.statusCode });
+    reqCounter.inc({ server_id: SERVER_ID, status: res.statusCode || 499 });
     activeConnsGauge.set({ server_id: SERVER_ID }, activeConnections);
-  });
+  };
+  res.on('finish', cleanup);
+  res.on('close', cleanup);
   next();
 });
 

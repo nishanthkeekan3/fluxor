@@ -14,6 +14,7 @@ export const normalOptions = {
       executor: 'constant-vus',
       vus: 50,
       duration: '60s',
+      gracefulStop: '0s',
     }
   },
   thresholds: {
@@ -33,6 +34,8 @@ export const spikeOptions = {
         { duration: '30s', target: 200 },
         { duration: '20s', target: 10 },
       ],
+      gracefulRampDown: '0s',
+      gracefulStop: '0s',
     }
   },
 }
@@ -44,6 +47,7 @@ export const failureOptions = {
       executor: 'constant-vus',
       vus: 50,
       duration: '90s',
+      gracefulStop: '0s',
     }
   },
   thresholds: {

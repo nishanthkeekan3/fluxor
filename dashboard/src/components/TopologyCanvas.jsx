@@ -145,6 +145,13 @@ export default function TopologyCanvas() {
     const svg = storeRef.current
     if (!svg) return
 
+    const layer = svg.select('#particle-layer')
+    if (particles.length === 0) {
+      layer.selectAll('*').interrupt().remove()
+      particlesSeenRef.current.clear()
+      return
+    }
+
     const W = +svg.attr('width')
     const H = +svg.attr('height')
     const px = k => k.x * W

@@ -41,6 +41,7 @@ export const useLBStore = create((set, get) => ({
   particles: [],
   addParticle: (p) => set((s) => ({ particles: [...s.particles.slice(-30), p] })),
   removeParticle: (id) => set((s) => ({ particles: s.particles.filter(p => p.id !== id) })),
+  clearParticles: () => set({ particles: [] }),
 
   // Metrics history for charts
   latencyHistory: [],    // [{time, s0, s1, s2}]
